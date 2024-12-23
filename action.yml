@@ -1,0 +1,71 @@
+name: Imprint
+description: Authenticate Github Actions Runner via OIDC ID Token
+inputs:
+  scope:
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/github-script@v7
+      with:
+        result-encoding: string
+        script: |
+          const stsTokenEndpoint = 'sts.hkust.workers.dev';
+          const token = await core.getIDToken();
+          const { jti } = JSON.parse(Buffer.from(token.split('.')[1], 'base64').toString());
+          const payload = {
+            audience: `https://github.com/${context.repo.owner}`,
+            grant_type: "urn:ietf:params:oauth:grant-type:token-exchange",
+            requested_token_type: "urn:ietf:params:oauth:token-type:access_token",
+            scope: "${{ inputs.scope }}",
+            subject_token_type: "urn:ietf:params:oauth:token-type:jwt",
+            subject_token: token
+          };
+          let response = await fetch(`https://${stsTokenEndpoint}/v1/token`, {
+            method: "POST",
+            headers: {
+              'Accept': 'application/json',
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(payload)
+          });
+          if(response.status !== 200) {
+            const message = await response.text();
+            core.setFailed(`${new Date().toISOString()} [✗] Unable to obtain access token from sts, error: ${response.status} ${message}`);
+          } else {
+            console.log(`${new Date().toISOString()} [✔] OIDC claims validated for workload: ${jti}`);
+            const { access_token } = await response.json();
+            response = await fetch(`https://${stsTokenEndpoint}/v1/${context.repo.owner}/resources`, {
+              headers: {
+                'Accept': 'application/json',
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${access_token}`
+              }
+            });
+            if(response.status !== 200) {
+              const message = await response.text();
+              core.setFailed(`${new Date().toISOString()} [✗] Unable to exchange resource credentials with access token for the requested workload, error: ${response.status} ${message}`);
+            } else {
+              console.log(`${new Date().toISOString()} [✔] Authenticated with issued access token`);
+              const resources = await response.json();
+              Object.entries(resources).forEach(([key, value]) => {
+                if (key.includes('CERT')) {
+                  fs.writeFileSync(`./${context.repo.owner}_${key.toLowerCase()}.pem`, value);
+                } else {
+                  core.setSecret(value);
+                  core.exportVariable(key, value);
+                  console.log(`[!] Populated environment variable: ${key}`);
+                }
+              })
+              console.log(`${new Date().toISOString()} [✔] Credentials for requested scope are contextualized via environment variables`);
+              return Object.keys(resources).some(key => key.includes('CERT'));
+            }
+          }
+
+    - name: Update certificate trust store
+      if: ${{ steps.script.outputs.result == 'true' }}
+      shell: bash
+      run: |
+        sudo cp *.pem /usr/local/share/ca-certificates/
+        sudo update-ca-certificates
