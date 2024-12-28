@@ -55,7 +55,7 @@ runs:
                 } else {
                   core.setSecret(value);
                   core.exportVariable(key, value);
-                  console.log(`[!] Populated environment variable: ${key}`);
+                  console.log(`${new Date().toISOString()} [!] Populated environment variable: ${key}`);
                 }
               })
               console.log(`${new Date().toISOString()} [✔] Credentials for requested scope are contextualized via environment variables`);
